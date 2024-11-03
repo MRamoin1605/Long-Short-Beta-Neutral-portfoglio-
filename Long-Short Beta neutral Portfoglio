@@ -1,0 +1,303 @@
+import pandas as pd
+import numpy as np 
+from matplotlib import pyplot as plt 
+import yfinance as yf 
+from datetime import datetime as dt 
+data= pd.read_excel(r'C:\Users\rmnma\OneDrive\Bureau\essaie extraction python.xlsx')
+pd.read_excel(r'C:\Users\rmnma\OneDrive\Bureau\essaie extraction python.xlsx')
+
+data = data.iloc[0:51]
+data = data.dropna(how='all', axis=1)
+
+tickers = data['Ticker'].tolist()
+
+
+# Entreprises long et short
+n = int(len(data) * 0.3) 
+shorts = data.tail(n)['Ticker'].values
+longs = data.head(n)['Ticker'].values
+
+print(f"entreprise long : {longs}")
+print(f"entreprise short : {shorts}")
+
+# ajout de l'indice de référence
+tickers = ['^STOXX50E'] +[i for i in tickers ]
+nb_val = len(tickers)
+
+
+def get_data(tickers):
+   df = yf.download(tickers, start = "2018-01-01", end = "2024-10-23")['Adj Close']
+   return df 
+
+df = get_data(tickers)
+
+# réorganisation de la DataFrame pour qu'elle soit dans l'ordre de la liste 'tickers' 
+# L'indice de référence sera alors la première colonne pour le calcul du Beta 
+df = df[tickers]
+
+print(df)
+
+log_returns = np.log(df/df.shift(1)).dropna()
+
+def calc_beta(df):
+    np_array = df.values
+    # Selection de toutes les ligne et uniquement de la première colonne (colonne de l'indice de référence)
+    m= np_array[:,0] 
+    beta =[]
+    
+    for ind, col in enumerate(df):
+        if ind > 0 : 
+            s = np_array[:,ind]
+            covariance = np.cov(s,m)
+            
+            beta.append(covariance[0,1]/covariance[1,1])
+            
+    return pd.Series(beta,  df.columns[1:],name= 'Beta')
+
+
+beta = calc_beta(log_returns)
+
+print(beta)
+beta_long = beta[longs]
+beta_short= beta[shorts]
+
+#Valeurs absolue des Betas 
+abs_beta_long = np.abs(beta_long)
+abs_beta_short = np.abs(beta_short)
+weight_long = np.round(abs_beta_long/abs_beta_long.sum(),5)
+weight_short =  np.round(abs_beta_short/abs_beta_short.sum()*-1,5)
+
+beta_weighted_long = beta_long * weight_long
+beta_weighted_short = beta_short * weight_short
+beta_net = np.sum(beta_weighted_long) + np.sum(beta_weighted_short)
+
+# Regroupement des informations de la partie Long dans une Data Frame
+pf_long = pd.DataFrame({
+    'stocks long ': longs,
+    'beta long ': beta_long,
+    'weight long' : weight_long,
+    'Beta weighted long' : beta_weighted_long, 
+    '       ' : '          '
+})
+
+# Regroupement des informations de la partie Short dans une Data Frame
+pf_short = pd.DataFrame({
+    'stocks short' : shorts,
+    'beta short' : beta_short, 
+    'weight short ' : weight_short,
+    'beta weighted short': beta_weighted_short 
+    
+})
+
+pf_long = pf_long.reset_index(drop=True)
+pf_short = pf_short.reset_index(drop=True)
+
+# Concaténation des Data frame Long et Short pour avoir pour visualiser les informations du portefeuille au complet 
+portfolio = pd.merge(pf_long, pf_short, on=pf_long.index)
+portfolio.loc['total',['weight long', 'Beta weighted long', 'weight short ', 'beta weighted short']] = \
+    np.round(portfolio[['weight long','Beta weighted long','weight short ', 'beta weighted short']].sum(),2)
+
+total_value = np.round(portfolio.loc[portfolio.index[-1], ['Beta weighted long', 'beta weighted short']].sum(),4)
+portfolio.loc['total', 'Total beta portefeuille'] = total_value
+portfolio['Total beta portefeuille'] = portfolio['Total beta portefeuille'].apply(lambda x: '{:^10}'.format(x) if isinstance(x, (int, float)) else x)
+
+portfolio.drop(portfolio.columns[0], axis=1)
+# Rendements brut de la partie Long et Short pour chaque actif
+returns_long = df[longs].pct_change().dropna()
+returns_short = df[shorts].pct_change().dropna()
+
+
+# Rendements pondéré par le poids de chaque partie
+returns_long = returns_long.dot(weight_long)
+returns_short = returns_short.dot(weight_short)
+
+#rendement cumulé de chaque partie du portefeuille 
+return_pf_long = (1+ returns_long).cumprod() -1
+return_pf_short = (1+ returns_short).cumprod()-1 
+
+# Rendement cumulé du portefeuille Long/Short 
+return_pf_LS = returns_long + returns_short
+return_pf_LS = (1+ return_pf_LS).cumprod()-1
+
+#print(return_pf_LS.head(10))
+# Calcul des rendements logarithmiques pondérés pour chaque composant du portefeuille
+log_returns_long = np.log(df[longs] / df[longs].shift(1)).dropna() * weight_long
+log_returns_short = np.log(df[shorts] / df[shorts].shift(1)).dropna() * weight_short
+
+# Rendements logarithmiques total de chaque partie du portefeuille 
+log_return_pf_long = log_returns_long.sum(axis=1)
+log_return_pf_short = log_returns_short.sum(axis=1)
+
+# Rendement logarithmique total du portefeuille (long + short)
+log_return_pf_LS = log_return_pf_long + log_return_pf_short
+
+# Calcul des rendements logarithmiques du marché de référence
+log_returns_Benchmark = np.log(df['^STOXX50E'] / df['^STOXX50E'].shift(1)).dropna()
+
+# Aligner les rendements du portefeuille et du marché de référence
+aligned_returns = pd.concat([log_return_pf_LS, log_returns_Benchmark], axis=1).dropna()
+
+log_return_pf_LS_aligned = aligned_returns.iloc[:, 0]  # Rendements du portefeuille alignés
+log_returns_Benchmark_aligned = aligned_returns.iloc[:, 1]  # Rendements du marché de référence alignés
+
+# Calcul de la covariance entre le portefeuille et le benchmark
+cov_matrix = np.cov(log_return_pf_LS_aligned, log_returns_Benchmark_aligned)
+
+# Calcul du Beta du portefeuille
+beta_portfolio = cov_matrix[0, 1] / cov_matrix[1, 1]
+
+print(f"Beta du portefeuille : {beta_portfolio:.4f}")
+
+# Calcul des rendements cumulé du marché de référence
+returns_Benchmark = df['^STOXX50E'].pct_change().dropna()
+returns_cum_Benchmark = (1+ returns_Benchmark).cumprod() -1
+print(log_returns_Benchmark)
+# Taux sans risque et taux de financement 
+rf = 0.009625  # 0.9625% Euribor 12 mois comme expliqué dans la partie I.b) de l'apport personnel 
+
+# Nombre de jours de trading par an (environ 252)
+trading_days = 252
+
+# Volatilité annualisée du portefeuille Long/Short (calcul n°13)
+volatilité_annualisée = log_return_pf_LS_aligned.std() * np.sqrt(trading_days)
+print(f"Volatilité annualisée : {volatilité_annualisée:.2%}")
+
+# Rendement moyen du portefeuille (annualisé) (calcul n°14)
+mean_return_pf = log_return_pf_LS_aligned.mean() * trading_days
+
+# Ajustement du rendement du portefeuille pour tenir compte du coût de financement de la partie short
+adjusted_mean_return_pf = mean_return_pf -  rf
+print(f"Rendement moyen annualisé ajusté du portefeuille (avec coût de financement short) : {adjusted_mean_return_pf:.2%}")
+
+# Rendement moyen du benchmark (annualisé)
+mean_return_benchmark = log_returns_Benchmark_aligned.mean() * trading_days
+
+# Calcul du Beta (avec covariance portefeuille et benchmark)
+cov_matrix = np.cov(log_return_pf_LS_aligned, log_returns_Benchmark_aligned)
+beta_portfolio = cov_matrix[0, 1] / cov_matrix[1, 1]
+print(f"Beta du portefeuille : {beta_portfolio:.2f}")
+
+# Ajustement du rendement du portefeuille pour tenir compte du coût de financement de la partie short
+adjusted_mean_return_pf = mean_return_pf -  rf
+print(f"Rendement moyen annualisé ajusté du portefeuille (avec coût de financement short) : {adjusted_mean_return_pf:.2%}")
+
+# Alpha de Jensen ajusté pour le coût de financement short (rf ici joue le role de taux sans risque)
+alpha_jensen = (adjusted_mean_return_pf - rf) - beta_portfolio * (mean_return_benchmark - rf)
+print(f"Alpha de Jensen : {alpha_jensen:.2%}")
+
+# Rendement excédentaire ajusté du portefeuille (par rapport au taux sans risque)
+excess_return_pf = adjusted_mean_return_pf - rf
+
+# Sharpe Ratio (ajusté pour le coût de financement short)
+SR = excess_return_pf / volatilité_annualisée
+print(f"Ratio de Sharpe : {SR:.2f}")
+
+# Sortino Ratio (volatilité à la baisse uniquement)
+downside_risk = log_return_pf_LS_aligned[log_return_pf_LS_aligned < 0].std() * np.sqrt(trading_days)
+sortino_R = excess_return_pf / downside_risk
+print(f"Ratio de Sortino : {sortino_R:.2f}")
+
+# Treynor Ratio (ajusté pour coût short)
+treynor_ratio = excess_return_pf / beta_portfolio
+print(f"Ratio de Treynor : {treynor_ratio:.4f}")
+
+
+
+trailing_vol_long = log_return_pf_long.rolling(window=30).std() * np.sqrt(trading_days)
+trailing_vol_short = log_return_pf_short.rolling(window=30).std() * np.sqrt(trading_days)
+trailing_vol_pf = log_return_pf_LS_aligned.rolling(window=30).std() * np.sqrt(trading_days)
+#Visualisation du portefeuille Long/Short 
+
+plt.figure(figsize=(10,6))
+plt.plot(return_pf_LS, label='Portefeuille Long/Short ESG')
+plt.plot(returns_cum_Benchmark, label ='Marché de référence STOXX50E')
+plt.title('Performance Cumulée du Portefeuille vs Benchmark')
+plt.xlabel('Date')
+plt.ylabel('Rendement Cumulé portefeuille L/S')
+plt.legend()
+plt.show()
+#Visualisation du portefeuille Long et du portefeuille short Short 
+
+plt.figure(figsize=(12,7))
+plt.plot(return_pf_long, label='Portefeuille Bons scores ESG')
+plt.plot(return_pf_short*-1, label='Portefeuille Mauvais scores ESG')
+plt.title('Performance Cumulé bons scores ESG vs mauvais scores ESG')
+plt.xlabel('Date')
+plt.ylabel('Rendement Cumulé')
+plt.legend()
+plt.show()
+#Visualisation du portefeuille Long et du portefeuille short Short 
+
+plt.figure(figsize=(12,7))
+plt.plot(log_return_pf_long, label='Rendements Bons scores ESG')
+plt.plot(log_return_pf_short*-1, label='Rendements Mauvais scores ESG')
+plt.title('Rendements bons scores ESG vs mauvais scores ESG')
+plt.xlabel('Date')
+plt.ylabel('Rendement ')
+plt.legend()
+plt.show()
+
+plt.figure(figsize=(12,7))
+plt.hist(log_return_pf_long, label='Rendements Bons scores ESG', bins =100)
+plt.hist(log_return_pf_short*-1, label='Rendements Mauvais scores ESG', bins=100)
+plt.title('Rendements bons scores ESG vs mauvais scores ESG')
+plt.xlabel('rendements')
+plt.ylabel('frequence ')
+plt.legend()
+plt.show()
+plt.figure(figsize=(12, 6))
+plt.plot(trailing_vol_long, color='blue', label='Volatilité glissante Bons scores (30 jours)')
+plt.plot(trailing_vol_short, color='orange', label='Volatilité glissante Mauvais scores(30 jours)')
+plt.plot(trailing_vol_short-trailing_vol_long, color='green', label='Ecart de volatilité (30 jours)')
+plt.title('Volatilité glissante (30 jours)')
+plt.xlabel('Date')
+plt.ylabel('Volatilité annualisée')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+
+
+comparable = ['ESGE.PA','^STOXX50E',]
+df_compar = yf.download(comparable, start = "2019-02-12", end = "2024-10-23")['Adj Close']
+
+
+return_compar = df_compar.pct_change().dropna()
+aligned_compar = pd.concat([returns_long + returns_short, return_compar], axis=1).dropna()
+return_cum_compar= (1+ aligned_compar).cumprod() -1
+
+
+return_cum_compar.columns.values[0] = 'Pf L/S'
+
+return_cum_compar.tail(10)
+compar_log_returns = np.log(df_compar/df_compar.shift(1)).dropna()
+
+compar_log_returns_aligned =pd.concat([log_return_pf_LS,compar_log_returns],axis=1).dropna()
+compar_log_returns_aligned.columns = ['Portefeuille L/S', 'Amundi MSCI Europe ESG Leaders', 'Eurostoxx 50']
+
+vol_compar = compar_log_returns_aligned.std() * np.sqrt(trading_days)
+mean_return_compar = compar_log_returns_aligned.mean() * trading_days
+
+SR_compar = (mean_return_compar-rf)/vol_compar
+
+downside_risk = compar_log_returns_aligned[compar_log_returns_aligned < 0].std() * np.sqrt(trading_days)
+sortino_R_compar = (mean_return_compar-rf) / downside_risk
+SR_compar
+
+analyse_compar = pd.DataFrame({
+    'Rendement Annuel moyen': round(mean_return_compar,4),
+    'Volatilité anuelle moyenne' : round(vol_compar,4),
+    'Sharpe ratio': round(SR_compar,4),
+    'Sortino ratio': round(sortino_R_compar,4)
+})
+
+analyse_compar.T
+plt.figure(figsize=(12,7))
+plt.plot(return_cum_compar['ESGE.PA'], label='Amundi MSCI Europe ESG Leaders')
+plt.plot(return_cum_compar['^STOXX50E'], label='Eurostoxx 50,')
+plt.plot(return_cum_compar['Pf L/S'], label='Portefeuille Long/Short')
+
+plt.xlabel('rendements')
+plt.ylabel('frequence ')
+plt.legend()
+plt.show()
